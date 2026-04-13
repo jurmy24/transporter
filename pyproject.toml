@@ -5,7 +5,7 @@ description = "Keyboard teleoperation for LeKiwi wheels"
 requires-python = ">=3.10"
 dependencies = [
     "lerobot[feetech]>=0.4.2",
-    "zmq>=0.0.0",
+    "pyzmq>=27.0.0",
 ]
 
 [tool.uv]
