@@ -115,8 +115,10 @@ class MqttClient:
     def disconnect(self) -> None:
         self._client.disconnect()
 
-    def publish_model(self, topic: str, model: BaseModel) -> None:
-        self._client.publish(topic, model.model_dump_json())
+    def publish_model(
+        self, topic: str, model: BaseModel, *, retain: bool = False
+    ) -> None:
+        self._client.publish(topic, model.model_dump_json(), retain=retain)
 
     def subscribe(self, topic: str, callback: MessageCallback) -> None:
         self._subs[topic] = callback
@@ -240,6 +242,7 @@ def main():
                 event=event,
                 task_complete=(event == "arrived"),
             ),
+            retain=True,
         )
 
     sm = StateMachine(S, S.IDLE, TRANSITIONS, on_transition=publish_state)
