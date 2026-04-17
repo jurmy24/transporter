@@ -1640,6 +1640,15 @@ wheels = [
 ]
 
 [[package]]
+name = "paho-mqtt"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/15/0a6214e76d4d32e7f663b109cf71fb22561c2be0f701d67f93950cd40542/paho_mqtt-2.1.0.tar.gz", hash = "sha256:12d6e7511d4137555a3f6ea167ae846af2c7357b10bc6fa4f7c3968fc1723834", size = 148848 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/cb/00451c3cf31790287768bb12c6bec834f5d292eaf3022afc88e14b8afc94/paho_mqtt-2.1.0-py3-none-any.whl", hash = "sha256:6db9ba9b34ed5bc6b6e3812718c7e06e2fd7444540df2455d2c51bd58808feee", size = 67219 },
+]
+
+[[package]]
 name = "pandas"
 version = "2.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2880,13 +2889,15 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "lerobot", extra = ["feetech"] },
-    { name = "zmq" },
+    { name = "paho-mqtt" },
+    { name = "pyzmq" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "lerobot", extras = ["feetech"], specifier = ">=0.4.2" },
-    { name = "zmq", specifier = ">=0.0.0" },
+    { name = "paho-mqtt", specifier = ">=2.1.0" },
+    { name = "pyzmq", specifier = ">=27.0.0" },
 ]
 
 [[package]]
@@ -3266,12 +3277,3 @@ sdist = { url = "https://files.pythonhosted.org/packages/e3/02/0f2892c661036d50e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/54/647ade08bf0db230bfea292f893923872fd20be6ac6f53b2b936ba839d75/zipp-3.23.0-py3-none-any.whl", hash = "sha256:071652d6115ed432f5ce1d34c336c0adfd6a884660d1e9712a256d3d3bd4b14e", size = 10276 },
 ]
-
-[[package]]
-name = "zmq"
-version = "0.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyzmq" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/78/833b2808793c1619835edb1a4e17a023d5d625f4f97ff25ffff986d1f472/zmq-0.0.0.tar.gz", hash = "sha256:6b1a1de53338646e8c8405803cffb659e8eb7bb02fff4c9be62a7acfac8370c9", size = 966 }
