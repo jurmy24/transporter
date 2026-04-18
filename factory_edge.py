@@ -14,8 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import signal
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -311,15 +311,18 @@ def main():
     mqtt_client.publish_model(
         machine_state_topic(MACHINE_NAME),
         MachineState(machine=MACHINE_NAME, state=sm.state.name),
+        retain=True,
     )
     log.info(
         "Transporter edge running. State: %s. Waiting for commands...", sm.state.name
     )
 
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda *_: stop.set())
+
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
+        stop.wait()
         log.info("Shutting down.")
     finally:
         robot.disconnect()
