@@ -16,6 +16,7 @@ import json
 import logging
 import signal
 import threading
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -67,6 +68,30 @@ class Command(BaseModel):
     timestamp: datetime = Field(default_factory=_now)
 
 
+class MachineResult(BaseModel):
+    machine: str
+    request_id: str
+    event: str
+    ok: bool
+    detail: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=_now)
+
+
+class PreflightCheck(BaseModel):
+    name: str
+    ok: bool
+    detail: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreflightReport(BaseModel):
+    machine: str
+    request_id: str
+    checks: list[PreflightCheck]
+    timestamp: datetime = Field(default_factory=_now)
+
+
 _P = "factory"
 
 
@@ -80,6 +105,10 @@ def machine_error_topic(m: str) -> str:
 
 def command_topic(m: str) -> str:
     return f"{_P}/commands/{m}"
+
+
+def machine_result_topic(m: str) -> str:
+    return f"{_P}/machines/{m}/results"
 
 
 MessageCallback = Callable[[str, dict[str, Any]], None]
@@ -205,6 +234,12 @@ TRANSITIONS = {
 # ── Main ────────────────────────────────────────────────────────────
 
 
+HandlerResult = tuple[bool, str, dict[str, Any]]
+Handler = Callable[[dict[str, Any]], HandlerResult]
+
+RECENT_REQUEST_IDS_MAX = 64
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Transporter factory edge (MQTT bridge)"
@@ -258,25 +293,174 @@ def main():
             ),
         )
 
-    last_distance: float = 0.5
+    # ── Handlers ─────────────────────────────────────────────────────
 
-    def on_command(_topic: str, data: dict):
-        nonlocal last_distance
+    def h_dispatch(params: dict) -> HandlerResult:
+        if sm.state != S.IDLE:
+            return (
+                False,
+                f"transporter is {sm.state.name}, cannot accept dispatch",
+                {"state": sm.state.name},
+            )
+        distance = float(params.get("distance", 0.5))
+        threading.Thread(target=run_delivery, args=(distance,), daemon=True).start()
+        return True, "delivery started", {"distance": distance}
+
+    def h_recover(params: dict) -> HandlerResult:
+        if sm.state != S.ERROR:
+            return (
+                False,
+                f"transporter is {sm.state.name}, not ERROR — ignoring recover",
+                {"state": sm.state.name},
+            )
+        threading.Thread(target=run_recovery, daemon=True).start()
+        return True, "recovery started", {}
+
+    def h_stop(_params: dict) -> HandlerResult:
+        try:
+            robot.stop_base()
+        except Exception as e:
+            return False, f"stop_base failed: {e}", {}
+        return True, "base stopped", {"state": sm.state.name}
+
+    def h_pause(_params: dict) -> HandlerResult:
+        """Stop-and-idle: halt the base and nudge the state machine to IDLE."""
+        try:
+            robot.stop_base()
+        except Exception as e:
+            log.warning("stop_base failed during pause: %s", e)
+        try:
+            if sm.state == S.DELIVERING:
+                sm.send("arrived")
+            elif sm.state == S.ERROR:
+                sm.send("recover")
+        except Exception as e:
+            log.warning("pause transition failed: %s", e)
+        return True, "paused", {"final_state": sm.state.name}
+
+    def h_resume(_params: dict) -> HandlerResult:
+        return (
+            True,
+            f"nothing to resume (state={sm.state.name})",
+            {"state": sm.state.name},
+        )
+
+    def h_get_odometry(_params: dict) -> HandlerResult:
+        try:
+            obs = robot.get_observation()
+        except Exception as e:
+            return False, f"get_observation failed: {e}", {}
+        # Observations can contain numpy types; coerce to plain floats.
+        safe: dict[str, Any] = {}
+        if isinstance(obs, dict):
+            for k, v in obs.items():
+                try:
+                    safe[str(k)] = float(v)
+                except (TypeError, ValueError):
+                    safe[str(k)] = str(v)
+        return True, "odometry", safe
+
+    def h_preflight(params: dict) -> HandlerResult:
+        """Minimal transporter preflight — standardises the verb across
+        machines so Clippy can call check_readiness uniformly."""
+        checks: list[dict[str, Any]] = []
+        connected = False
+        try:
+            connected = bool(robot.is_connected)
+        except Exception:
+            connected = False
+        checks.append(
+            {
+                "name": "transporter_connected",
+                "ok": connected,
+                "detail": ""
+                if connected
+                else "Motor bus is not connected. Plug the transporter in.",
+                "data": {"connected": connected},
+            }
+        )
+        idle = sm.state == S.IDLE
+        checks.append(
+            {
+                "name": "transporter_idle",
+                "ok": idle,
+                "detail": "" if idle else f"Transporter is {sm.state.name}, not IDLE.",
+                "data": {"state": sm.state.name},
+            }
+        )
+        report = PreflightReport(
+            machine=MACHINE_NAME,
+            request_id="",
+            checks=[PreflightCheck.model_validate(c) for c in checks],
+        )
+        return (
+            all(c.ok for c in report.checks),
+            "preflight complete",
+            report.model_dump(mode="json"),
+        )
+
+    HANDLERS: dict[str, Handler] = {
+        "dispatch": h_dispatch,
+        "recover": h_recover,
+        "stop": h_stop,
+        "pause": h_pause,
+        "resume": h_resume,
+        "get_odometry": h_get_odometry,
+        "preflight": h_preflight,
+    }
+
+    recent_req_ids: deque[str] = deque(maxlen=RECENT_REQUEST_IDS_MAX)
+
+    def publish_result(
+        req_id: str, event: str, ok: bool, detail: str, data: dict
+    ) -> None:
+        if not req_id:
+            return
+        mqtt_client.publish_model(
+            machine_result_topic(MACHINE_NAME),
+            MachineResult(
+                machine=MACHINE_NAME,
+                request_id=req_id,
+                event=event,
+                ok=ok,
+                detail=detail,
+                data=data,
+            ),
+        )
+
+    def on_command(_topic: str, data: dict) -> None:
         try:
             cmd = Command.model_validate(data)
         except Exception:
             log.warning("Invalid command: %s", data)
             return
-        if cmd.event == "dispatch" and sm.state == S.IDLE:
-            last_distance = cmd.params.get("distance", 0.5)
-            threading.Thread(target=run_delivery, daemon=True).start()
-        elif cmd.event == "recover" and sm.state == S.ERROR:
-            threading.Thread(target=run_recovery, daemon=True).start()
+        handler = HANDLERS.get(cmd.event)
+        if handler is None:
+            log.warning("Unknown command event: %s", cmd.event)
+            return
+        req_id = str(cmd.params.get("request_id") or "")
+        if req_id and req_id in recent_req_ids:
+            log.info("Dropping duplicate request_id=%s", req_id)
+            return
+        if req_id:
+            recent_req_ids.append(req_id)
 
-    def run_delivery():
+        def run() -> None:
+            try:
+                ok, detail, payload = handler(cmd.params)
+            except Exception as e:
+                log.exception("Handler %s crashed", cmd.event)
+                ok, detail, payload = False, f"handler crashed: {e}", {}
+            publish_result(req_id, cmd.event, ok, detail, payload)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ── Long-running workers ─────────────────────────────────────────
+
+    def run_delivery(distance: float) -> None:
         try:
             sm.send("dispatch")
-            drive_forward(robot, last_distance)
+            drive_forward(robot, distance)
             sm.send("arrived")
         except Exception as e:
             log.error("Delivery failed: %s", e)
@@ -288,7 +472,7 @@ def main():
                 sm.send("fault")
                 publish_error("drive_failed", str(e))
 
-    def run_recovery():
+    def run_recovery() -> None:
         try:
             robot.stop_base()
         except Exception:
@@ -297,6 +481,8 @@ def main():
             sm.send("recover")
         except Exception as e:
             log.error("Recovery transition failed: %s", e)
+
+    # ── Main loop ────────────────────────────────────────────────────
 
     mqtt_client.connect()
     mqtt_client.loop_start()
