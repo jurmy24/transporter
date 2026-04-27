@@ -24,16 +24,17 @@ from enum import Enum, auto
 from typing import Any
 
 import paho.mqtt.client as mqtt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from tasks import (
     DEFAULT_DISTANCE_TO_ASSEMBLER_M,
     DEFAULT_DISTANCE_TO_BASE_M,
     DEFAULT_DISTANCE_TO_DROP_OFF_M,
-    drive_forward,
+    STATION_TAG_IDS,
     go_to_assembler,
     go_to_drop_off,
     return_to_base,
+    run_route,
 )
 from transporter import Transporter
 
@@ -98,6 +99,22 @@ class PreflightReport(BaseModel):
     request_id: str
     checks: list[PreflightCheck]
     timestamp: datetime = Field(default_factory=_now)
+
+
+# ── Transporter-specific command params ─────────────────────────────
+
+
+class DispatchParams(BaseModel):
+    """Params accepted by the `dispatch` command.
+
+    The orchestrator is authoritative about location: each dispatch carries
+    both `from_station` and `to_station`, so the transporter is stateless
+    across legs and just looks up the route.
+    """
+
+    from_station: str
+    to_station: str
+    request_id: str = ""
 
 
 _P = "factory"
@@ -330,7 +347,29 @@ def main():
         return True, f"{leg_name} started", {"distance": distance, "leg": leg_name}
 
     def h_dispatch(params: dict) -> HandlerResult:
-        return _start_leg(params, drive_forward, 0.5, "dispatch")
+        if sm.state != S.IDLE:
+            return (
+                False,
+                f"transporter is {sm.state.name}, cannot accept dispatch",
+                {"state": sm.state.name},
+            )
+        try:
+            dp = DispatchParams.model_validate(params)
+        except ValidationError as e:
+            return False, f"invalid dispatch params: {e}", {"params": params}
+        for name in (dp.from_station, dp.to_station):
+            if name not in STATION_TAG_IDS:
+                return False, f"unknown station: {name}", {"params": params}
+        threading.Thread(
+            target=run_delivery,
+            args=(dp.from_station, dp.to_station),
+            daemon=True,
+        ).start()
+        return (
+            True,
+            f"dispatched {dp.from_station} → {dp.to_station}",
+            {"from": dp.from_station, "to": dp.to_station},
+        )
 
     def h_go_to_assembler(params: dict) -> HandlerResult:
         return _start_leg(
@@ -500,6 +539,24 @@ def main():
         threading.Thread(target=run, daemon=True).start()
 
     # ── Long-running workers ─────────────────────────────────────────
+
+    def run_delivery(from_station: str, to_station: str) -> None:
+        try:
+            sm.send("dispatch")
+            run_route(robot, from_station, to_station)
+            sm.send("arrived")
+        except Exception as e:
+            log.error("Delivery %s → %s failed: %s", from_station, to_station, e)
+            try:
+                robot.stop_base()
+            except Exception:
+                pass
+            if sm.state == S.DELIVERING:
+                sm.send("fault")
+                publish_error(
+                    "drive_failed",
+                    f"route {from_station} → {to_station}: {e}",
+                )
 
     def run_leg(
         runner: Callable[..., None],

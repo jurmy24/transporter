@@ -1,9 +1,10 @@
-"""Transporter task implementations — separated from communication logic."""
+"""Transporter navigation: stations, motion primitives, docking, routes."""
 
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -12,12 +13,27 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# ── Stations ────────────────────────────────────────────────────────
+# Single source of truth for ArUco tag IDs. Drawn from DICT_4X4_50;
+# IDs are kept sparse so a misread is unlikely to resolve to another station.
+
+STATION_TAG_IDS: dict[str, int] = {
+    "picker": 10,
+    "manipulator": 20,
+    "delivery": 30,
+}
+
+
+# ── Default distances ───────────────────────────────────────────────
 # Placeholder distances for the three rpi_build legs — small enough that
 # the robot just nudges in each direction during bring-up. Replace with
 # surveyed waypoints / SLAM goals once the route is mapped.
 DEFAULT_DISTANCE_TO_ASSEMBLER_M = 0.05  # 5 cm forward
 DEFAULT_DISTANCE_TO_DROP_OFF_M = 0.05  # 5 cm right
 DEFAULT_DISTANCE_TO_BASE_M = 0.05  # 5 cm back (undo leg 1)
+
+
+# ── Motion primitives ───────────────────────────────────────────────
 
 
 def _drive(
@@ -60,6 +76,20 @@ def drive_forward(
     _drive(robot, x_vel=1.0, y_vel=0.0, distance_m=distance_m, speed=speed)
 
 
+# ── Docking (stub) ──────────────────────────────────────────────────
+
+
+def dock_to_tag(
+    robot: "Transporter", tag_id: int, timeout_s: float = 10.0
+) -> None:
+    """Visually servo onto an ArUco tag.
+
+    STUB: pending camera + ArUco detector. Logs the target so the dispatch
+    flow can be exercised end-to-end before perception is wired up.
+    """
+    log.info("dock_to_tag(tag_id=%d, timeout=%.1fs) — STUB", tag_id, timeout_s)
+
+
 # ── rpi_build legs (placeholders) ──────────────────────────────────
 # Each leg is a tiny nudge in a different direction so the operator
 # can visually confirm the right command was received. They share
@@ -94,3 +124,47 @@ def return_to_base(
     """Leg 3/3 placeholder: nudge backward to home base."""
     log.info("Leg 3/3: returning to base (back %.2f m placeholder)", distance_m)
     _drive(robot, x_vel=-1.0, y_vel=0.0, distance_m=distance_m)
+
+
+# ── Routes ──────────────────────────────────────────────────────────
+# Each route is a plain function that drives the robot from one station to
+# another. Stub bodies for now — geometry will be filled in once the routes
+# have been measured on the floor.
+
+
+RouteFn = Callable[["Transporter"], None]
+
+
+def _picker_to_manipulator(robot: "Transporter") -> None:
+    log.info("Route picker → manipulator (stub)")
+    dock_to_tag(robot, STATION_TAG_IDS["manipulator"])
+
+
+def _manipulator_to_delivery(robot: "Transporter") -> None:
+    log.info("Route manipulator → delivery (stub)")
+    dock_to_tag(robot, STATION_TAG_IDS["delivery"])
+
+
+def _delivery_to_picker(robot: "Transporter") -> None:
+    log.info("Route delivery → picker (stub)")
+    dock_to_tag(robot, STATION_TAG_IDS["picker"])
+
+
+ROUTES: dict[tuple[str, str], RouteFn] = {
+    ("picker", "manipulator"): _picker_to_manipulator,
+    ("manipulator", "delivery"): _manipulator_to_delivery,
+    ("delivery", "picker"): _delivery_to_picker,
+}
+
+
+def run_route(robot: "Transporter", from_station: str, to_station: str) -> None:
+    if from_station not in STATION_TAG_IDS:
+        raise ValueError(f"unknown from_station: {from_station}")
+    if to_station not in STATION_TAG_IDS:
+        raise ValueError(f"unknown to_station: {to_station}")
+    route = ROUTES.get((from_station, to_station))
+    if route is None:
+        raise ValueError(f"no route defined: {from_station} → {to_station}")
+    log.info("Running route %s → %s", from_station, to_station)
+    route(robot)
+    log.info("Arrived at %s", to_station)
