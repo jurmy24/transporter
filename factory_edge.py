@@ -24,9 +24,18 @@ from enum import Enum, auto
 from typing import Any
 
 import paho.mqtt.client as mqtt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from tasks import drive_forward
+from tasks import (
+    DEFAULT_DISTANCE_TO_ASSEMBLER_M,
+    DEFAULT_DISTANCE_TO_BASE_M,
+    DEFAULT_DISTANCE_TO_DROP_OFF_M,
+    STATION_TAG_IDS,
+    go_to_assembler,
+    go_to_drop_off,
+    return_to_base,
+    run_route,
+)
 from transporter import Transporter
 
 logging.basicConfig(
@@ -90,6 +99,22 @@ class PreflightReport(BaseModel):
     request_id: str
     checks: list[PreflightCheck]
     timestamp: datetime = Field(default_factory=_now)
+
+
+# ── Transporter-specific command params ─────────────────────────────
+
+
+class DispatchParams(BaseModel):
+    """Params accepted by the `dispatch` command.
+
+    The orchestrator is authoritative about location: each dispatch carries
+    both `from_station` and `to_station`, so the transporter is stateless
+    across legs and just looks up the route.
+    """
+
+    from_station: str
+    to_station: str
+    request_id: str = ""
 
 
 _P = "factory"
@@ -295,6 +320,32 @@ def main():
 
     # ── Handlers ─────────────────────────────────────────────────────
 
+    def _start_leg(
+        params: dict,
+        runner: Callable[..., None],
+        default_distance: float,
+        leg_name: str,
+    ) -> HandlerResult:
+        """Shared body for dispatch + the three rpi_build legs.
+
+        Each leg is just `IDLE → DELIVERING → run something → arrived`.
+        The only thing that varies is which task function runs and what
+        the default distance is, so we factor that out here.
+        """
+        if sm.state != S.IDLE:
+            return (
+                False,
+                f"transporter is {sm.state.name}, cannot accept {leg_name}",
+                {"state": sm.state.name},
+            )
+        distance = float(params.get("distance", default_distance))
+        threading.Thread(
+            target=run_leg,
+            args=(runner, distance, leg_name),
+            daemon=True,
+        ).start()
+        return True, f"{leg_name} started", {"distance": distance, "leg": leg_name}
+
     def h_dispatch(params: dict) -> HandlerResult:
         if sm.state != S.IDLE:
             return (
@@ -302,9 +353,38 @@ def main():
                 f"transporter is {sm.state.name}, cannot accept dispatch",
                 {"state": sm.state.name},
             )
-        distance = float(params.get("distance", 0.5))
-        threading.Thread(target=run_delivery, args=(distance,), daemon=True).start()
-        return True, "delivery started", {"distance": distance}
+        try:
+            dp = DispatchParams.model_validate(params)
+        except ValidationError as e:
+            return False, f"invalid dispatch params: {e}", {"params": params}
+        for name in (dp.from_station, dp.to_station):
+            if name not in STATION_TAG_IDS:
+                return False, f"unknown station: {name}", {"params": params}
+        threading.Thread(
+            target=run_delivery,
+            args=(dp.from_station, dp.to_station),
+            daemon=True,
+        ).start()
+        return (
+            True,
+            f"dispatched {dp.from_station} → {dp.to_station}",
+            {"from": dp.from_station, "to": dp.to_station},
+        )
+
+    def h_go_to_assembler(params: dict) -> HandlerResult:
+        return _start_leg(
+            params, go_to_assembler, DEFAULT_DISTANCE_TO_ASSEMBLER_M, "go_to_assembler"
+        )
+
+    def h_go_to_drop_off(params: dict) -> HandlerResult:
+        return _start_leg(
+            params, go_to_drop_off, DEFAULT_DISTANCE_TO_DROP_OFF_M, "go_to_drop_off"
+        )
+
+    def h_return_to_base(params: dict) -> HandlerResult:
+        return _start_leg(
+            params, return_to_base, DEFAULT_DISTANCE_TO_BASE_M, "return_to_base"
+        )
 
     def h_recover(params: dict) -> HandlerResult:
         if sm.state != S.ERROR:
@@ -401,6 +481,9 @@ def main():
 
     HANDLERS: dict[str, Handler] = {
         "dispatch": h_dispatch,
+        "go_to_assembler": h_go_to_assembler,
+        "go_to_drop_off": h_go_to_drop_off,
+        "return_to_base": h_return_to_base,
         "recover": h_recover,
         "stop": h_stop,
         "pause": h_pause,
@@ -457,20 +540,43 @@ def main():
 
     # ── Long-running workers ─────────────────────────────────────────
 
-    def run_delivery(distance: float) -> None:
+    def run_delivery(from_station: str, to_station: str) -> None:
         try:
             sm.send("dispatch")
-            drive_forward(robot, distance)
+            run_route(robot, from_station, to_station)
             sm.send("arrived")
         except Exception as e:
-            log.error("Delivery failed: %s", e)
+            log.error("Delivery %s → %s failed: %s", from_station, to_station, e)
             try:
                 robot.stop_base()
             except Exception:
                 pass
             if sm.state == S.DELIVERING:
                 sm.send("fault")
-                publish_error("drive_failed", str(e))
+                publish_error(
+                    "drive_failed",
+                    f"route {from_station} → {to_station}: {e}",
+                )
+
+    def run_leg(
+        runner: Callable[..., None],
+        distance: float,
+        leg_name: str,
+    ) -> None:
+        """Drive one leg: enter DELIVERING, run the task, arrive (or fault)."""
+        try:
+            sm.send("dispatch")
+            runner(robot, distance)
+            sm.send("arrived")
+        except Exception as e:
+            log.error("Leg %s failed: %s", leg_name, e)
+            try:
+                robot.stop_base()
+            except Exception:
+                pass
+            if sm.state == S.DELIVERING:
+                sm.send("fault")
+                publish_error("drive_failed", f"{leg_name}: {e}")
 
     def run_recovery() -> None:
         try:
