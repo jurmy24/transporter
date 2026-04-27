@@ -24,9 +24,9 @@ from enum import Enum, auto
 from typing import Any
 
 import paho.mqtt.client as mqtt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from tasks import drive_forward
+from tasks import STATION_TAG_IDS, run_route
 from transporter import Transporter
 
 logging.basicConfig(
@@ -90,6 +90,22 @@ class PreflightReport(BaseModel):
     request_id: str
     checks: list[PreflightCheck]
     timestamp: datetime = Field(default_factory=_now)
+
+
+# ── Transporter-specific command params ─────────────────────────────
+
+
+class DispatchParams(BaseModel):
+    """Params accepted by the `dispatch` command.
+
+    The orchestrator is authoritative about location: each dispatch carries
+    both `from_station` and `to_station`, so the transporter is stateless
+    across legs and just looks up the route.
+    """
+
+    from_station: str
+    to_station: str
+    request_id: str = ""
 
 
 _P = "factory"
@@ -302,9 +318,23 @@ def main():
                 f"transporter is {sm.state.name}, cannot accept dispatch",
                 {"state": sm.state.name},
             )
-        distance = float(params.get("distance", 0.5))
-        threading.Thread(target=run_delivery, args=(distance,), daemon=True).start()
-        return True, "delivery started", {"distance": distance}
+        try:
+            dp = DispatchParams.model_validate(params)
+        except ValidationError as e:
+            return False, f"invalid dispatch params: {e}", {"params": params}
+        for name in (dp.from_station, dp.to_station):
+            if name not in STATION_TAG_IDS:
+                return False, f"unknown station: {name}", {"params": params}
+        threading.Thread(
+            target=run_delivery,
+            args=(dp.from_station, dp.to_station),
+            daemon=True,
+        ).start()
+        return (
+            True,
+            f"dispatched {dp.from_station} → {dp.to_station}",
+            {"from": dp.from_station, "to": dp.to_station},
+        )
 
     def h_recover(params: dict) -> HandlerResult:
         if sm.state != S.ERROR:
@@ -457,20 +487,23 @@ def main():
 
     # ── Long-running workers ─────────────────────────────────────────
 
-    def run_delivery(distance: float) -> None:
+    def run_delivery(from_station: str, to_station: str) -> None:
         try:
             sm.send("dispatch")
-            drive_forward(robot, distance)
+            run_route(robot, from_station, to_station)
             sm.send("arrived")
         except Exception as e:
-            log.error("Delivery failed: %s", e)
+            log.error("Delivery %s → %s failed: %s", from_station, to_station, e)
             try:
                 robot.stop_base()
             except Exception:
                 pass
             if sm.state == S.DELIVERING:
                 sm.send("fault")
-                publish_error("drive_failed", str(e))
+                publish_error(
+                    "drive_failed",
+                    f"route {from_station} → {to_station}: {e}",
+                )
 
     def run_recovery() -> None:
         try:
