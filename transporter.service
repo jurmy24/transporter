@@ -1,0 +1,21 @@
+[Unit]
+Description=Transporter factory edge (MQTT bridge + state machine)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lekiwi
+Group=lekiwi
+SupplementaryGroups=dialout
+WorkingDirectory=/home/lekiwi/Documents/transporter
+ExecStart=/home/lekiwi/Documents/transporter/run.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# Give the serial device a moment to enumerate after boot.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 20); do [ -e "${SERIAL_PORT:-/dev/ttyACM0}" ] && exit 0; sleep 1; done; exit 0'
+
+[Install]
+WantedBy=multi-user.target
