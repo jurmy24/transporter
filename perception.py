@@ -299,7 +299,8 @@ def _cmd_make_board(args: argparse.Namespace) -> None:
     ruler after printing to confirm your printer didn't auto-scale.
     """
     DPI = 300
-    PAGE_MM = (215.9, 279.4)  # US Letter portrait
+    PAGE_SIZES_MM = {"a4": (210.0, 297.0), "letter": (215.9, 279.4)}
+    PAGE_MM = PAGE_SIZES_MM[args.paper]
     MARGIN_MM = 8.0
 
     cols, rows = args.cols, args.rows
@@ -324,13 +325,16 @@ def _cmd_make_board(args: argparse.Namespace) -> None:
         return int(round(mm * px_per_mm))
 
     page_w, page_h = mm_to_px(PAGE_MM[0]), mm_to_px(PAGE_MM[1])
-    board_w, board_h = mm_to_px(board_mm[0]), mm_to_px(board_mm[1])
+    # Use integer pixels-per-square so generateImage doesn't fail an internal
+    # ROI assertion when (board_w, board_h) doesn't divide evenly into cells.
+    cell_px = mm_to_px(square_mm)
+    board_w, board_h = cols * cell_px, rows * cell_px
 
     dictionary = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
     board = cv2.aruco.CharucoBoard(
         (cols, rows), square_mm / 1000.0, marker_mm / 1000.0, dictionary
     )
-    board_img = board.generateImage((board_w, board_h))
+    board_img = board.generateImage((board_w, board_h), marginSize=0, borderBits=1)
 
     page = np.full((page_h, page_w), 255, dtype=np.uint8)
     y0 = mm_to_px(MARGIN_MM)
@@ -364,8 +368,15 @@ def _cmd_make_board(args: argparse.Namespace) -> None:
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(args.out), page)
-    print(f"Wrote {args.out} ({DPI} DPI, US Letter portrait)")
+    if args.out.suffix.lower() == ".pdf":
+        from PIL import Image
+
+        Image.fromarray(page, mode="L").save(
+            str(args.out), "PDF", resolution=float(DPI)
+        )
+    else:
+        cv2.imwrite(str(args.out), page)
+    print(f"Wrote {args.out} ({DPI} DPI, {args.paper.upper()} portrait)")
     print("Print at ACTUAL SIZE / 100% (uncheck 'fit to page'/'shrink to fit').")
     print("Verify the 100 mm scale bar with a ruler before calibrating.\n")
     print("Calibrate command:")
@@ -548,7 +559,8 @@ def main() -> None:
     g.set_defaults(func=_cmd_generate)
 
     b = sub.add_parser("make-board", help="Printable ChArUco board for US Letter")
-    b.add_argument("--out", type=Path, default=Path("calibration_board.png"))
+    b.add_argument("--out", type=Path, default=Path("calibration_board.pdf"))
+    b.add_argument("--paper", choices=["a4", "letter"], default="a4")
     b.add_argument("--cols", type=int, default=7, help="ChArUco squares across")
     b.add_argument("--rows", type=int, default=10, help="ChArUco squares down")
     b.add_argument("--square-mm", type=float, default=25.0)
