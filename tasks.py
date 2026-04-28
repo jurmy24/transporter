@@ -135,8 +135,12 @@ def return_to_base(
 RouteFn = Callable[["Transporter"], None]
 
 
+PICKER_TO_MANIPULATOR_NUDGE_M = 0.5
+
+
 def _picker_to_manipulator(robot: "Transporter") -> None:
-    log.info("Route picker → manipulator (stub)")
+    log.info("Route picker → manipulator: nudging forward %.2f m", PICKER_TO_MANIPULATOR_NUDGE_M)
+    drive_forward(robot, PICKER_TO_MANIPULATOR_NUDGE_M)
     dock_to_tag(robot, STATION_TAG_IDS["manipulator"])
 
 
