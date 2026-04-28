@@ -1,0 +1,39 @@
+{
+  "picker": {
+    "tag_id": 1,
+    "size_m": 0.095,
+    "dock_pose": {
+      "forward_m": 0.36487412533449187,
+      "lateral_m": -0.019987831794535168
+    }
+  },
+  "manipulator": {
+    "tag_id": 6,
+    "size_m": 0.036,
+    "dock_pose": {
+      "forward_m": 0.5670865185446703,
+      "lateral_m": -0.07226262202795888
+    }
+  },
+  "delivery": {
+    "tag_id": 30,
+    "size_m": 0.036,
+    "dock_pose": null
+  },
+  "manipulator_far": {
+    "tag_id": 0,
+    "size_m": 0.095,
+    "dock_pose": {
+      "forward_m": 0.49512418384452145,
+      "lateral_m": 0.012417411290155687
+    }
+  },
+  "picker_exit": {
+    "tag_id": 1,
+    "size_m": 0.095,
+    "dock_pose": {
+      "forward_m": 0.822276903492773,
+      "lateral_m": -0.028006737355807203
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "picker -> manipulator": [
+    {"type": "dock",   "marker":  "picker_exit"},
+    {"type": "rotate", "yaw_deg": 90.0},
+    {"type": "dock",   "marker":  "manipulator_far"},
+    {"type": "rotate", "yaw_deg": -90.0},
+    {"type": "dock",   "marker":  "manipulator"}
+  ],
+  "manipulator -> picker": [
+    {"type": "dock",   "marker":  "picker_exit", "search_vy": -0.08},
+    {"type": "dock",   "marker":  "picker"}
+  ]
+}

@@ -26,6 +26,18 @@ from typing import Any
 import paho.mqtt.client as mqtt
 from pydantic import BaseModel, Field, ValidationError
 
+import cv2
+
+import tasks
+from perception import (
+    ArucoDetector,
+    Camera,
+    CameraIntrinsics,
+    CameraMount,
+    DEFAULT_INTRINSICS_PATH,
+    FrameStream,
+    MjpegServer,
+)
 from tasks import (
     DEFAULT_DISTANCE_TO_ASSEMBLER_M,
     DEFAULT_DISTANCE_TO_BASE_M,
@@ -265,17 +277,96 @@ Handler = Callable[[dict[str, Any]], HandlerResult]
 RECENT_REQUEST_IDS_MAX = 64
 
 
+def _start_idle_preview(
+    stream: FrameStream,
+    mjpeg: MjpegServer,
+    stop: threading.Event,
+) -> threading.Thread:
+    """Spawn a thread that pushes annotated camera frames to MJPEG while idle.
+
+    During a dock the controller owns the stream output (dock_active is set);
+    this worker steps aside in that case to avoid HUD flicker. The detector
+    here uses a default marker size — detected corners + ids are the only
+    info we need for the idle preview, and pose accuracy doesn't matter for
+    a passive view.
+    """
+    intrinsics = (
+        CameraIntrinsics.load(DEFAULT_INTRINSICS_PATH)
+        if DEFAULT_INTRINSICS_PATH.exists()
+        else None
+    )
+    mount = CameraMount.load()
+    detector = ArucoDetector(marker_size_m=0.1, intrinsics=intrinsics)
+
+    def run() -> None:
+        last_t = 0.0
+        log.info("Idle camera preview running.")
+        while not stop.is_set():
+            res = stream.wait_next(after_t=last_t, timeout=1.0)
+            if res is None:
+                continue
+            frame, last_t = res
+            if tasks.dock_active.is_set():
+                continue  # dock controller owns the MJPEG output right now
+            detections = detector.detect(frame)
+            overlay = frame.copy()
+            detector.draw(overlay, detections)
+            cv2.putText(
+                overlay, "IDLE", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
+            )
+            ids_seen = ",".join(str(d.id) for d in detections) or "none"
+            cv2.putText(
+                overlay, f"tags: {ids_seen}", (10, 56),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
+            )
+            if mount.rotated_180:
+                overlay = cv2.rotate(overlay, cv2.ROTATE_180)
+            mjpeg.push(overlay)
+
+    t = threading.Thread(target=run, daemon=True, name="IdlePreview")
+    t.start()
+    return t
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Transporter factory edge (MQTT bridge)"
     )
-    parser.add_argument("--broker", default="localhost", help="MQTT broker host")
+    parser.add_argument("--broker", default="10.8.179.78", help="MQTT broker host")
     parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port")
     parser.add_argument(
         "--port", default="/dev/ttyACM0", help="Serial port for motor bus"
     )
     parser.add_argument("--id", default="transporter", help="Robot ID")
+    parser.add_argument(
+        "--stream-port",
+        type=int,
+        default=None,
+        help="If set, serve an MJPEG preview of the dock camera on this port "
+        "(e.g. 8080 → http://<pi>:8080/). Off by default.",
+    )
     args = parser.parse_args()
+
+    if args.stream_port is not None:
+        server = MjpegServer(args.stream_port)
+        server.start()
+        tasks.mjpeg_server = server
+        log.info("MJPEG preview enabled on port %d", args.stream_port)
+
+    # Always-on camera reader. Single owner of /dev/video0; dock_to_tag and
+    # the idle preview thread both consume from it. Started before any
+    # dispatch can land so the stream is live the moment factory_edge is up.
+    frame_stream = FrameStream(Camera())
+    frame_stream.start()
+    tasks.frame_stream = frame_stream
+
+    idle_preview_stop = threading.Event()
+    idle_preview_thread: threading.Thread | None = None
+    if args.stream_port is not None:
+        idle_preview_thread = _start_idle_preview(
+            frame_stream, tasks.mjpeg_server, idle_preview_stop
+        )
 
     from lerobot.robots.config import RobotConfig
 
@@ -617,6 +708,13 @@ def main():
         stop.wait()
         log.info("Shutting down.")
     finally:
+        idle_preview_stop.set()
+        if idle_preview_thread is not None:
+            idle_preview_thread.join(timeout=2.0)
+        try:
+            frame_stream.stop()
+        except Exception as e:
+            log.warning("FrameStream stop failed: %s", e)
         robot.disconnect()
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
