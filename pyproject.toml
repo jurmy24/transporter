@@ -9,6 +9,7 @@ dependencies = [
     "pyzmq>=27.0.0",
     "opencv-contrib-python>=4.10.0",
     "numpy>=1.26",
+    "flask>=3.0",
 ]
 
 [tool.uv]

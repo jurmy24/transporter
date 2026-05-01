@@ -333,7 +333,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Transporter factory edge (MQTT bridge)"
     )
-    parser.add_argument("--broker", default="10.8.179.78", help="MQTT broker host")
+    parser.add_argument("--broker", default="10.8.210.18", help="MQTT broker host")
     parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port")
     parser.add_argument(
         "--port", default="/dev/ttyACM0", help="Serial port for motor bus"
@@ -342,13 +342,19 @@ def main():
     parser.add_argument(
         "--stream-port",
         type=int,
-        default=None,
-        help="If set, serve an MJPEG preview of the dock camera on this port "
-        "(e.g. 8080 → http://<pi>:8080/). Off by default.",
+        default=8080,
+        help="MJPEG preview port (default: 8080 → http://<pi>:8080/). "
+        "Pass --no-stream to disable.",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Disable the MJPEG preview server (and idle preview thread).",
     )
     args = parser.parse_args()
 
-    if args.stream_port is not None:
+    stream_enabled = not args.no_stream
+    if stream_enabled:
         server = MjpegServer(args.stream_port)
         server.start()
         tasks.mjpeg_server = server
@@ -363,7 +369,7 @@ def main():
 
     idle_preview_stop = threading.Event()
     idle_preview_thread: threading.Thread | None = None
-    if args.stream_port is not None:
+    if stream_enabled:
         idle_preview_thread = _start_idle_preview(
             frame_stream, tasks.mjpeg_server, idle_preview_stop
         )
